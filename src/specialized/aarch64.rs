@@ -39,6 +39,9 @@ impl State {
 const LONG: usize = 8192;
 const SHORT: usize = 256;
 
+// The 3-way loop advances each chain four words at a time.
+const _: () = assert!(LONG % 32 == 0 && SHORT % 32 == 0);
+
 static LONG_SHIFT: [[u32; 256]; 4] = crate::combine::shift_table(LONG as u64);
 static SHORT_SHIFT: [[u32; 256]; 4] = crate::combine::shift_table(SHORT as u64);
 
@@ -85,10 +88,16 @@ unsafe fn crc_triple<'a>(
         // B's bytes and XOR in B's state, then the same for C.
         let mut c1 = 0;
         let mut c2 = 0;
-        for ((&qa, &qb), &qc) in a.iter().zip(b).zip(c) {
-            c0 = arch::__crc32d(c0, qa);
-            c1 = arch::__crc32d(c1, qb);
-            c2 = arch::__crc32d(c2, qc);
+        for ((qa, qb), qc) in a
+            .chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .zip(c.chunks_exact(4))
+        {
+            for k in 0..4 {
+                c0 = arch::__crc32d(c0, qa[k]);
+                c1 = arch::__crc32d(c1, qb[k]);
+                c2 = arch::__crc32d(c2, qc[k]);
+            }
         }
         c0 = crate::combine::shift(shift, c0) ^ c1;
         c0 = crate::combine::shift(shift, c0) ^ c2;
