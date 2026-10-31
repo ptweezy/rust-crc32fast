@@ -23,9 +23,9 @@ jobs:
       # name=branch@commit; the first is the baseline.
       VARIANTS: >-
         base=arm-exp-base@111c399138476348dd566e4585056db995f55b65
-        shift3=arm-exp-shift3@fdc3c989d0e21d6ee352c3408a720a0fd6b82547
-        u256=arm-exp-shift3c@88693b6104c6f30048c61dcacabf602d572e7028
-        u512=arm-exp-shift3b@abda61e2c301e761d3691fa9c8facb9f39c46349
+        guard512=arm-exp-guard512@6292c59e0d9ff148a553cfc86d574d27b8fd8984
+        inl512=arm-exp-inl512@43ba90a2b681eacb14137f3b50165e7a6024fbf9
+        inl512L=arm-exp-inl512L@c5eea5ea2e5b8843dd5ea5ad9af6f4dd0c5065f6
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
