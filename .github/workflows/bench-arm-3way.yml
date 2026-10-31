@@ -23,9 +23,7 @@ jobs:
       # name=branch@commit; the first is the baseline.
       VARIANTS: >-
         base=arm-exp-base@111c399138476348dd566e4585056db995f55b65
-        guard512=arm-exp-guard512@6292c59e0d9ff148a553cfc86d574d27b8fd8984
-        inl512=arm-exp-inl512@43ba90a2b681eacb14137f3b50165e7a6024fbf9
-        inl512L=arm-exp-inl512L@c5eea5ea2e5b8843dd5ea5ad9af6f4dd0c5065f6
+        final=arm-exp-final@c7dc2ff436c459e2d3201369e0cf49f98d6cf8e4
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -61,11 +59,11 @@ jobs:
       - name: Benchmark, interleaved
         run: |
           mkdir -p results
-          for r in 1 2 3 4; do
+          for r in 1 2 3 4 5; do
             for spec in $VARIANTS; do
               name=${spec%%=*}
               "$HOME/bin/$name" --bench --noplot --warm-up-time 0.5 --measurement-time 1.5 \
-                '^(specialized|probe)/' > "results/$r.$name.txt" 2>&1
+                '^(hash|specialized|probe)/' > "results/$r.$name.txt" 2>&1
             done
             echo "round $r done"
           done
