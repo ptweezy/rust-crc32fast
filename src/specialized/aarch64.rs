@@ -36,7 +36,7 @@ impl State {
 // Bytes per stream in the 3-way loops. Merging the streams appends zero bytes to the earlier CRC
 // states, which for a fixed length is a multiplication by a constant: four lookups in a table built
 // at compile time.
-const LONG: usize = 8192;
+const LONG: usize = 32768;
 const SHORT: usize = 512;
 
 // The 3-way loop advances each chain four words at a time.
