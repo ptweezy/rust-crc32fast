@@ -58,8 +58,12 @@ pub unsafe fn calculate(crc: u32, data: &[u8]) -> u32 {
 
     // A single `crc32d` chain is latency-bound: each instruction depends on the previous result.
     // While enough words remain, advance three independent chains over consecutive blocks.
-    let (r, quads) = crc_triple(r, quads, LONG / 8, &LONG_SHIFT);
-    let (r, quads) = crc_triple(r, quads, SHORT / 8, &SHORT_SHIFT);
+    let (r, quads) = if quads.len() >= 3 * SHORT / 8 {
+        let (r, quads) = crc_triple(r, quads, LONG / 8, &LONG_SHIFT);
+        crc_triple(r, quads, SHORT / 8, &SHORT_SHIFT)
+    } else {
+        (r, quads)
+    };
     let r = crc_quads(r, quads);
 
     // Unaligned trailing bytes.
