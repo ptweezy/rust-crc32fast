@@ -37,7 +37,7 @@ impl State {
 // states, which for a fixed length is a multiplication by a constant: four lookups in a table built
 // at compile time.
 const LONG: usize = 8192;
-const SHORT: usize = 256;
+const SHORT: usize = 512;
 
 // The 3-way loop advances each chain four words at a time.
 const _: () = assert!(LONG % 32 == 0 && SHORT % 32 == 0);
