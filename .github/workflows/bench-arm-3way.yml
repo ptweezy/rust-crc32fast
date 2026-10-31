@@ -1,0 +1,85 @@
+name: aarch64 3-way bench
+
+# Compares variants of the aarch64 3-way path on GitHub-hosted ARM runners. Each job builds every
+# variant on its own machine, runs the tests, then alternates benchmark rounds between them.
+
+on:
+  push:
+    branches:
+      - bench-arm-3way
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      # name=branch@commit; the first is the baseline.
+      VARIANTS: >-
+        base=arm-exp-base@111c399138476348dd566e4585056db995f55b65
+        no3way=arm-exp-no3way@e2defaac0a450ae8115b83d68c42c319045688fa
+        shift3=arm-exp-shift3@fdc3c989d0e21d6ee352c3408a720a0fd6b82547
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Machine
+        run: |
+          rustc --version
+          uname -m
+          if command -v lscpu >/dev/null; then lscpu | grep -E 'Model name|^CPU\(s\)'; else sysctl -n machdep.cpu.brand_string hw.ncpu; fi
+
+      - name: Build and test each variant
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          for spec in $VARIANTS; do
+            name=${spec%%=*}; ref=${spec#*=}; branch=${ref%@*}; sha=${ref#*@}
+            git fetch -q origin "$branch"
+            git worktree add -q --detach "$RUNNER_TEMP/$name" "$sha"
+            (
+              cd "$RUNNER_TEMP/$name"
+              echo "== $name ($(git log --oneline -1))"
+              cargo test --release 2>&1 | grep -E '^test result|FAILED|panicked'
+              exe=$(cargo bench --bench bench --no-run --message-format=json 2>/dev/null \
+                | grep -o '"executable":"[^"]*"' | tail -1 | cut -d'"' -f4)
+              cp "$exe" "$HOME/bin/$name"
+            )
+          done
+
+      - name: Benchmark, interleaved
+        run: |
+          mkdir -p results
+          for r in 1 2 3 4; do
+            for spec in $VARIANTS; do
+              name=${spec%%=*}
+              "$HOME/bin/$name" --bench --noplot --warm-up-time 0.5 --measurement-time 1.5 \
+                '^(specialized|probe)/' > "results/$r.$name.txt" 2>&1
+            done
+            echo "round $r done"
+          done
+
+      - name: Summarize
+        run: |
+          names=$(for spec in $VARIANTS; do printf '%s ' "${spec%%=*}"; done)
+          {
+            echo "### ${{ matrix.os }}"
+            echo '```text'
+            python3 .github/bench/compare.py results $names
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arm-3way-${{ matrix.os }}
+          path: results
