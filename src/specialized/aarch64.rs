@@ -35,7 +35,7 @@ impl State {
 
 // Conservative crossover: 64 words per stream gives the interleaved loop enough work to
 // amortize its two `combine` calls (3 * 64 * 8 bytes = 1.5 KiB).
-const MIN_TRIPLE_QUADS: usize = 192;
+const MIN_TRIPLE_QUADS: usize = usize::MAX;
 
 // target_feature is necessary to allow rustc to inline the crc32* wrappers
 #[target_feature(enable = "crc")]
