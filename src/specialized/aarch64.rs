@@ -33,9 +33,14 @@ impl State {
     }
 }
 
-// Conservative crossover: 64 words per stream gives the interleaved loop enough work to
-// amortize its two `combine` calls (3 * 64 * 8 bytes = 1.5 KiB).
-const MIN_TRIPLE_QUADS: usize = 192;
+// Bytes per stream in the 3-way loops. Merging the streams appends zero bytes to the earlier CRC
+// states, which for a fixed length is a multiplication by a constant: four lookups in a table built
+// at compile time.
+const LONG: usize = 8192;
+const SHORT: usize = 256;
+
+static LONG_SHIFT: [[u32; 256]; 4] = crate::combine::shift_table(LONG as u64);
+static SHORT_SHIFT: [[u32; 256]; 4] = crate::combine::shift_table(SHORT as u64);
 
 // target_feature is necessary to allow rustc to inline the crc32* wrappers
 #[target_feature(enable = "crc")]
@@ -48,56 +53,47 @@ pub unsafe fn calculate(crc: u32, data: &[u8]) -> u32 {
     // Unaligned leading bytes.
     r = crc_bytes(r, pre_quad);
 
-    if quads.len() >= MIN_TRIPLE_QUADS {
-        // A single `crc32d` chain is latency-bound: each instruction depends on the previous
-        // result. Splitting the aligned region into three equal, contiguous blocks and advancing
-        // three independent accumulators in lockstep keeps several `crc32d` in flight, then
-        // `combine` reassembles them (appending the zero-seeded later blocks to the first).
-        let n3 = quads.len() / 3;
-        let block_len = (n3 * 8) as u64;
+    // A single `crc32d` chain is latency-bound: each instruction depends on the previous result.
+    // While enough words remain, advance three independent chains over consecutive blocks.
+    let (r, quads) = crc_triple(r, quads, LONG / 8, &LONG_SHIFT);
+    let (r, quads) = crc_triple(r, quads, SHORT / 8, &SHORT_SHIFT);
+    let r = crc_quads(r, quads);
 
-        let a = &quads[0..n3];
-        let b = &quads[n3..2 * n3];
-        let c = &quads[2 * n3..3 * n3];
+    // Unaligned trailing bytes.
+    crc_bytes(r, post_quad)
+}
 
-        // Internal (bit-inverted) states. A carries the running CRC; B and C start from zero.
-        let mut c0 = !r;
-        let mut c1 = !0u32;
-        let mut c2 = !0u32;
+/// Folds `quads` into the finalized CRC `crc` in rounds of three consecutive `n`-word blocks, with
+/// one `crc32d` chain per block, while at least `3 * n` words remain. Returns the CRC and the words
+/// left over. `shift` must be the table for `8 * n` bytes.
+#[target_feature(enable = "crc")]
+unsafe fn crc_triple<'a>(
+    crc: u32,
+    mut quads: &'a [u64],
+    n: usize,
+    shift: &[[u32; 256]; 4],
+) -> (u32, &'a [u64]) {
+    // Internal (bit-inverted) state.
+    let mut c0 = !crc;
+    while quads.len() >= 3 * n {
+        let (a, rest) = quads.split_at(n);
+        let (b, rest) = rest.split_at(n);
+        let (c, rest) = rest.split_at(n);
+        quads = rest;
 
-        // Unroll each stream by 4 while keeping the three chains independent.
-        let mut chunks_a = a.chunks_exact(4);
-        let mut chunks_b = b.chunks_exact(4);
-        let mut chunks_c = c.chunks_exact(4);
-        for ((qa, qb), qc) in (&mut chunks_a).zip(&mut chunks_b).zip(&mut chunks_c) {
-            for k in 0..4 {
-                c0 = arch::__crc32d(c0, qa[k]);
-                c1 = arch::__crc32d(c1, qb[k]);
-                c2 = arch::__crc32d(c2, qc[k]);
-            }
-        }
-        for ((&qa, &qb), &qc) in chunks_a
-            .remainder()
-            .iter()
-            .zip(chunks_b.remainder())
-            .zip(chunks_c.remainder())
-        {
+        // B and C start from a zero state, so appending them to A is linear: shift A's state past
+        // B's bytes and XOR in B's state, then the same for C.
+        let mut c1 = 0;
+        let mut c2 = 0;
+        for ((&qa, &qb), &qc) in a.iter().zip(b).zip(c) {
             c0 = arch::__crc32d(c0, qa);
             c1 = arch::__crc32d(c1, qb);
             c2 = arch::__crc32d(c2, qc);
         }
-
-        r = crate::combine::combine(!c0, !c1, block_len);
-        r = crate::combine::combine(r, !c2, block_len);
-
-        // Words left over after the three equal blocks.
-        r = crc_quads(r, &quads[3 * n3..]);
-    } else {
-        r = crc_quads(r, quads);
+        c0 = crate::combine::shift(shift, c0) ^ c1;
+        c0 = crate::combine::shift(shift, c0) ^ c2;
     }
-
-    // Unaligned trailing bytes.
-    crc_bytes(r, post_quad)
+    (!c0, quads)
 }
 
 #[target_feature(enable = "crc")]
