@@ -69,7 +69,8 @@ pub unsafe fn calculate(crc: u32, data: &[u8]) -> u32 {
 /// Folds `quads` into the finalized CRC `crc` in rounds of three consecutive `n`-word blocks, with
 /// one `crc32d` chain per block, while at least `3 * n` words remain. Returns the CRC and the words
 /// left over. `shift` must be the table for `8 * n` bytes.
-#[target_feature(enable = "crc")]
+// Always inlined into `calculate`, which supplies the `crc` target feature.
+#[inline(always)]
 unsafe fn crc_triple<'a>(
     crc: u32,
     mut quads: &'a [u64],
