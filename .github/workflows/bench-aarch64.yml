@@ -1,0 +1,75 @@
+name: aarch64 bench
+
+# Benchmarks master against the aarch64 change in PR #74 on a GitHub-hosted ARM64 runner.
+# Both versions are built and run on the same machine, alternating rounds, to keep noise down.
+
+on:
+  push:
+    branches:
+      - bench-aarch64
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      BASE: 9ecaae9e3ed2779857a79e3eb524ea775771a6ee # master
+      PR: 2b8c55cbcb29c4072cb79f51f7f49270b9c7ddb5 # aarch64-without-align-to (#74)
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Machine
+        run: |
+          rustc --version
+          lscpu | grep -E 'Model name|Architecture|^CPU\(s\)|Vendor'
+          grep -m1 -o -w crc32 /proc/cpuinfo || echo "no crc32 feature"
+
+      - name: Build and test both versions
+        run: |
+          set -euo pipefail
+          git fetch -q origin aarch64-without-align-to
+          mkdir -p "$HOME/bin"
+          for v in base pr; do
+            if [ "$v" = base ]; then sha=$BASE; else sha=$PR; fi
+            git worktree add -q --detach "/tmp/$v" "$sha"
+            (
+              cd "/tmp/$v"
+              echo "== $v ($(git log --oneline -1))"
+              cargo test --release 2>&1 | grep -E '^test result|FAILED|panicked'
+              exe=$(cargo bench --bench bench --no-run --message-format=json 2>/dev/null \
+                | grep -o '"executable":"[^"]*"' | tail -1 | cut -d'"' -f4)
+              cp "$exe" "$HOME/bin/$v"
+            )
+          done
+
+      - name: Benchmark, interleaved
+        run: |
+          mkdir -p results
+          for r in 1 2 3 4 5; do
+            for v in base pr; do
+              "$HOME/bin/$v" --bench --noplot --warm-up-time 0.5 --measurement-time 2 \
+                '^(hash|specialized)/' > "results/$r.$v.txt" 2>&1
+            done
+            echo "round $r done"
+          done
+
+      - name: Summarize
+        run: |
+          {
+            echo '```text'
+            python3 .github/bench/summarize.py results
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-bench
+          path: results
