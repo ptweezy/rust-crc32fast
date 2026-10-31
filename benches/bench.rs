@@ -125,5 +125,13 @@ fn hash(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, baseline, specialized, combine, hash);
+fn probe(c: &mut Criterion) {
+    let Some(hasher) = Hasher::internal_new_specialized(0, 0) else {
+        return;
+    };
+    let sizes = [768, 1536, 3072, 4096, 8192, 24576, 32768, 65536, 262144];
+    bench_update(c, "probe", &sizes, hasher);
+}
+
+criterion_group!(benches, baseline, specialized, combine, hash, probe);
 criterion_main!(benches);
