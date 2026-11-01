@@ -490,6 +490,17 @@ unsafe fn fold_crc<V: Vector>(crc: u32, data: &[u8]) -> u32 {
                 let mut v3 = V::load(&rest[3 * len..]);
                 rest = &rest[4 * len..];
 
+                // bench only: 256-bit vectors loop over four accumulators.
+                if len == 32 {
+                    let m4 = V::splat(V::M4);
+                    while rest.len() >= 4 * len {
+                        v0 = v0.fold(V::load(rest), m4);
+                        v1 = v1.fold(V::load(&rest[len..]), m4);
+                        v2 = v2.fold(V::load(&rest[2 * len..]), m4);
+                        v3 = v3.fold(V::load(&rest[3 * len..]), m4);
+                        rest = &rest[4 * len..];
+                    }
+                }
                 if rest.len() >= 4 * len {
                     let mut v4 = V::load(rest);
                     let mut v5 = V::load(&rest[len..]);
