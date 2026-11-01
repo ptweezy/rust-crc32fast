@@ -47,9 +47,39 @@ enum Kind {
     Avx512Ymm,
 }
 
-#[cfg(stable_vpclmulqdq)]
 impl Kind {
+    /// Encodes `kind` for `State::detect`'s cache, which reserves 0 for "not detected yet".
+    #[inline]
+    fn encode(kind: Option<Kind>) -> u8 {
+        match kind {
+            None => 1,
+            Some(Kind::Sse) => 2,
+            #[cfg(stable_vpclmulqdq)]
+            Some(Kind::Avx2) => 3,
+            #[cfg(stable_vpclmulqdq)]
+            Some(Kind::Avx512) => 4,
+            #[cfg(stable_vpclmulqdq)]
+            Some(Kind::Avx512Ymm) => 5,
+        }
+    }
+
+    /// Decodes what `encode` returned.
+    #[inline]
+    fn decode(code: u8) -> Option<Kind> {
+        match code {
+            2 => Some(Kind::Sse),
+            #[cfg(stable_vpclmulqdq)]
+            3 => Some(Kind::Avx2),
+            #[cfg(stable_vpclmulqdq)]
+            4 => Some(Kind::Avx512),
+            #[cfg(stable_vpclmulqdq)]
+            5 => Some(Kind::Avx512Ymm),
+            _ => None,
+        }
+    }
+
     /// The `AVX-512` kind for this CPU.
+    #[cfg(stable_vpclmulqdq)]
     #[inline]
     fn avx512() -> Self {
         if eager_zmm_downclocking() {
@@ -61,30 +91,10 @@ impl Kind {
 }
 
 /// Whether this is one of the Intel CPUs whose frequency drops too eagerly when 512-bit registers
-/// are used only occasionally: Ice Lake and Tiger Lake, the list libdeflate uses. CPUID is slow,
-/// especially in a virtual machine, so the answer is computed once.
+/// are used only occasionally: Ice Lake and Tiger Lake, the list libdeflate uses.
 #[cfg(stable_vpclmulqdq)]
-#[inline]
-fn eager_zmm_downclocking() -> bool {
-    use core::sync::atomic::{AtomicU8, Ordering};
-
-    // 0 = not computed yet, 1 = no, 2 = yes.
-    static CACHE: AtomicU8 = AtomicU8::new(0);
-    match CACHE.load(Ordering::Relaxed) {
-        1 => false,
-        2 => true,
-        _ => {
-            let yes = cpuid_eager_zmm_downclocking();
-            CACHE.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
-            yes
-        }
-    }
-}
-
-#[cfg(stable_vpclmulqdq)]
-#[cold]
 #[allow(unused_unsafe)] // `__cpuid` is a safe function on newer toolchains
-fn cpuid_eager_zmm_downclocking() -> bool {
+fn eager_zmm_downclocking() -> bool {
     // SAFETY: Only called for CPUs with AVX-512, which all have the CPUID instruction.
     let vendor = unsafe { arch::__cpuid(0) };
     // "GenuineIntel", in EBX, EDX, ECX order.
@@ -105,9 +115,30 @@ pub struct State {
 }
 
 impl State {
-    #[cfg(not(feature = "std"))]
+    /// The kernel for this CPU, if any. Finding it takes several feature checks, and CPUID on
+    /// `AVX-512` CPUs, which is slow in a virtual machine. `Hasher::new` asks every time, and
+    /// `crc32fast::hash` constructs a `Hasher` for every call, so the answer is cached: after the
+    /// first call, this is one load.
     #[inline]
     fn detect() -> Option<Kind> {
+        use core::sync::atomic::{AtomicU8, Ordering};
+
+        // 0 = not detected yet, else `Kind::encode` of the result. Racing threads store the same
+        // value, so relaxed ordering is enough.
+        static CACHE: AtomicU8 = AtomicU8::new(0);
+        match CACHE.load(Ordering::Relaxed) {
+            0 => {
+                let kind = Self::detect_uncached();
+                CACHE.store(Kind::encode(kind), Ordering::Relaxed);
+                kind
+            }
+            code => Kind::decode(code),
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    #[cold]
+    fn detect_uncached() -> Option<Kind> {
         if cfg!(target_feature = "pclmulqdq")
             && cfg!(target_feature = "sse2")
             && cfg!(target_feature = "sse4.1")
@@ -133,8 +164,8 @@ impl State {
     }
 
     #[cfg(feature = "std")]
-    #[inline]
-    fn detect() -> Option<Kind> {
+    #[cold]
+    fn detect_uncached() -> Option<Kind> {
         if is_x86_feature_detected!("pclmulqdq")
             && is_x86_feature_detected!("sse2")
             && is_x86_feature_detected!("sse4.1")
