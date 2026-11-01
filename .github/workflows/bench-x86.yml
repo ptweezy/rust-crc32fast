@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         # Several jobs per image, to catch more of the CPU models behind each runner pool.
-        run: [1, 2, 3, 4, 5, 6]
+        run: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -30,9 +30,9 @@ jobs:
       VARIANTS: >-
         base=master@118796a864d40beed113e887522531d5474b8abc
         tree=bench-x86-tree@51d386cc6c839d503a1b605151b047cbcac407c4
-        cancel=bench-x86-cancel2@5f011314f8df37a1dc07dc59ec16b8c4191890aa
-        iclvex=bench-icl-vex@8a747ce7db8cdbb3b915ea316bf64f99bebfd4c7
-        iclacc4=bench-icl-acc4@73f4685486e0b7b2dace34d55852cefc38f2d27a
+        z1024=bench-icl-z1024@b0b1a050e3160fc685daca73eac66bb01c8c8de5
+        z512=bench-icl-z512@a07628d700a6af8e46e75dda45db737cedf3ad1a
+        z64=bench-icl-z64@56989c82766ab82c2c649d4090a17dc9b086a8ba
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -58,9 +58,8 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round looks at Intel CPUs, and at Windows (where vector registers are
-          # callee-saved); other jobs stop here.
-          if grep -qi intel cpu.txt || [ "$RUNNER_OS" = Windows ]; then
+          # This round looks at Intel CPUs only; other jobs stop here.
+          if grep -qi intel cpu.txt; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
