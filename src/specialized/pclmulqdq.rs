@@ -320,9 +320,33 @@ unsafe fn calculate_avx512<const MIN_ZMM: usize, const CANCEL: bool>(crc: u32, d
     }
     if n < MIN_ZMM {
         fold_crc::<__m256i, false>(crc, data)
+    } else if CANCEL && n >= MIN_CANCEL_BYTES {
+        calculate_avx512_cancel(crc, data)
     } else {
-        fold_crc::<__m512i, CANCEL>(crc, data)
+        fold_crc::<__m512i, false>(crc, data)
     }
+}
+
+/// `calculate_avx512` for inputs that start with `cancel_and_fold_512`, in a function of its own.
+/// That loop keeps 22 vectors in registers, and on Windows, where `xmm6` to `xmm15` are
+/// callee-saved, a function that uses them saves and restores them on every call. Inlined into
+/// `calculate_avx512`, that cost about 1 ns per call for every input length on Zen 5.
+#[cfg(stable_vpclmulqdq)]
+#[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
+#[inline(never)]
+#[target_feature(
+    enable = "pclmulqdq",
+    enable = "sse2",
+    enable = "sse4.1",
+    enable = "ssse3",
+    enable = "avx",
+    enable = "avx2",
+    enable = "vpclmulqdq",
+    enable = "avx512f",
+    enable = "avx512vl"
+)]
+unsafe fn calculate_avx512_cancel(crc: u32, data: &[u8]) -> u32 {
+    fold_crc::<__m512i, true>(crc, data)
 }
 
 /// A vector of one or more 128-bit lanes for `fold_crc`. Every method is `#[inline(always)]` so
