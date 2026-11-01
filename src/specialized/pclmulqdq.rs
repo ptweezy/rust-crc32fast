@@ -241,7 +241,7 @@ const MIN_ZMM_BYTES: usize = 64;
 /// As `MIN_ZMM_BYTES`, on CPUs that downclock eagerly when 512-bit vectors are used. This is where
 /// 512-bit vectors started before they were used for shorter inputs.
 #[cfg(stable_vpclmulqdq)]
-const MIN_ZMM_BYTES_DOWNCLOCKING: usize = 2048;
+const MIN_ZMM_BYTES_DOWNCLOCKING: usize = 64;
 
 /// SSE kernel: 128-bit `PCLMULQDQ`.
 #[target_feature(
