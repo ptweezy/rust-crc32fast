@@ -1,0 +1,105 @@
+name: x86 bench
+
+# Compares the x86 kernels on GitHub-hosted x86 runners, whose CPUs vary from job to job (AMD Zen 3
+# and Zen 4, Intel Ice Lake and newer), so each job prints its CPU. Each job builds every variant
+# on its own machine, runs the tests, then alternates benchmark rounds between them.
+
+on:
+  push:
+    branches:
+      - bench-x86
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04, windows-latest, windows-2022]
+        # Two jobs per image, to catch more of the CPU models behind each runner pool.
+        run: [1, 2]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      # name=branch@commit; the first is the baseline.
+      VARIANTS: >-
+        base=master@118796a864d40beed113e887522531d5474b8abc
+        tree=x86-tree-fold@76680540a584cb2cf3943f84a74bdb1dade8aaed
+        cancel=x86-xor-cancel@d4d8c4868e70a145c779781c0a84d0f5467eb85d
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Machine
+        run: |
+          rustc --version
+          if command -v lscpu >/dev/null; then
+            lscpu | grep -E 'Model name|^CPU\(s\)'
+            lscpu | sed -n 's/^Model name: *//p' | head -1 > cpu.txt
+            flags=""
+            for f in avx2 avx512f avx512vl vpclmulqdq; do
+              grep -qw "$f" /proc/cpuinfo && flags="$flags $f"
+            done
+            echo "flags:$flags" | tee -a cpu.txt
+          else
+            powershell -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" | tr -d '\r' | tee cpu.txt
+          fi
+          # One line, for the summary heading.
+          tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
+
+      - name: Build and test each variant
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          for spec in $VARIANTS; do
+            name=${spec%%=*}; ref=${spec#*=}; branch=${ref%@*}; sha=${ref#*@}
+            git fetch -q origin "$branch"
+            git worktree add -q --detach "$RUNNER_TEMP/$name" "$sha"
+            (
+              cd "$RUNNER_TEMP/$name"
+              echo "== $name ($(git log --oneline -1))"
+              cargo test --release 2>&1 | grep -E '^test result|FAILED|panicked'
+              # On Windows the JSON path has escaped backslashes, and the copy needs its .exe.
+              exe=$(cargo bench --bench bench --no-run --message-format=json 2>/dev/null \
+                | grep -o '"executable":"[^"]*"' | tail -1 | cut -d'"' -f4 | sed 's#\\\\#/#g')
+              ext=""
+              if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
+              cp "$exe" "$HOME/bin/$name$ext"
+            )
+          done
+
+      - name: Benchmark, interleaved
+        run: |
+          mkdir -p results
+          for r in 1 2 3 4 5; do
+            for spec in $VARIANTS; do
+              name=${spec%%=*}
+              "$HOME/bin/$name" --bench --noplot --warm-up-time 0.5 --measurement-time 1.5 \
+                '^(hash|specialized)/' > "results/$r.$name.txt" 2>&1
+            done
+            echo "round $r done"
+          done
+
+      - name: Summarize
+        run: |
+          names=$(for spec in $VARIANTS; do printf '%s ' "${spec%%=*}"; done)
+          {
+            echo "### ${{ matrix.os }} #${{ matrix.run }}: $(cat cpu.txt)"
+            echo '```text'
+            python3 .github/bench/compare.py results $names || python .github/bench/compare.py results $names
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x86-${{ matrix.os }}-${{ matrix.run }}
+          path: results
