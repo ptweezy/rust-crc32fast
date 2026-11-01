@@ -58,6 +58,14 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
+          # This round looks at Intel CPUs, and at Windows (where vector registers are
+          # callee-saved); other jobs stop here.
+          if grep -qi intel cpu.txt || [ "$RUNNER_OS" = Windows ]; then
+            echo run=true >> "$GITHUB_OUTPUT"
+          else
+            echo run=false >> "$GITHUB_OUTPUT"
+          fi
+          echo "gate: $(tail -1 "$GITHUB_OUTPUT")"
 
       - name: Build and test each variant
         if: steps.machine.outputs.run == 'true'
