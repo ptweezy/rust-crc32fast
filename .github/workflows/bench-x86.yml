@@ -17,9 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04, windows-latest, windows-2022]
-        # Two jobs per image, to catch more of the CPU models behind each runner pool.
-        run: [1, 2]
+        os: [ubuntu-latest, windows-latest]
+        # Several jobs per image, to catch more of the CPU models behind each runner pool.
+        run: [1, 2, 3, 4]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -29,8 +29,9 @@ jobs:
       # name=branch@commit; the first is the baseline.
       VARIANTS: >-
         base=master@118796a864d40beed113e887522531d5474b8abc
-        tree=x86-tree-fold@76680540a584cb2cf3943f84a74bdb1dade8aaed
-        cancel=x86-xor-cancel@d4d8c4868e70a145c779781c0a84d0f5467eb85d
+        tree=bench-x86-tree@51d386cc6c839d503a1b605151b047cbcac407c4
+        cancel=bench-x86-cancel@167c461a106cded338949790d5af91152b732dd9
+        zen4=bench-x86-zen4@2d32ebf3e67ccba0aa517b2a04b0c8105a6e36e3
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +100,8 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: x86-${{ matrix.os }}-${{ matrix.run }}
           path: results

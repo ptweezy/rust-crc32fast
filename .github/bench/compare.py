@@ -18,7 +18,7 @@ times = collections.defaultdict(dict)  # (group, size) -> {(variant, round): ns}
 for f in sorted(results.glob("*.txt")):
     rnd, variant = f.stem.split(".")
     name = None
-    for line in f.read_text(errors="replace").splitlines():
+    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
         m = re.match(r"^(\w+)/(\d+)", line)
         if m:
             name = (m.group(1), int(m.group(2)))
