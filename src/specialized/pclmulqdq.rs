@@ -119,7 +119,9 @@ impl Kind {
                 Kind::Avx512Ymm
             }
             // The cancelling loop keeps 22 vectors in registers, which 32-bit x86 doesn't have.
-            AUTHENTIC_AMD if family == 0x1a && cfg!(target_arch = "x86_64") => Kind::Avx512Cancel,
+            AUTHENTIC_AMD if (family == 0x19 || family == 0x1a) && cfg!(target_arch = "x86_64") => {
+                Kind::Avx512Cancel
+            }
             _ => Kind::Avx512,
         }
     }
