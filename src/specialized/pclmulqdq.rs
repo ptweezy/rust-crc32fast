@@ -484,8 +484,8 @@ macro_rules! each_of_16 {
 }
 
 /// Inputs this long and up start with `cancel_and_fold_512`. It needs 4 KiB: one 2 KiB block to
-/// cancel chunks in, and the 2 KiB after it that those chunks are XORed into.
-#[cfg(stable_vpclmulqdq)]
+/// cancel chunks in, and the 2 KiB after it that those chunks are XORed into. (`fold_crc` refers to
+/// it on every toolchain, so it isn't gated on `stable_vpclmulqdq` like the function.)
 const MIN_CANCEL_BYTES: usize = 4096;
 
 /// Starts the 512-bit main loop on CPUs whose vector units can run many XORs alongside the
