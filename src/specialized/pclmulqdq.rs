@@ -45,6 +45,10 @@ enum Kind {
     /// eagerly when they're used.
     #[cfg(stable_vpclmulqdq)]
     Avx512Ymm,
+    /// As `Avx512`, and long inputs cancel half their chunks with XORs instead of folding them
+    /// (`cancel_and_fold_512`), for CPUs where that's faster.
+    #[cfg(stable_vpclmulqdq)]
+    Avx512Cancel,
 }
 
 impl Kind {
@@ -60,6 +64,8 @@ impl Kind {
             Some(Kind::Avx512) => 4,
             #[cfg(stable_vpclmulqdq)]
             Some(Kind::Avx512Ymm) => 5,
+            #[cfg(stable_vpclmulqdq)]
+            Some(Kind::Avx512Cancel) => 6,
         }
     }
 
@@ -74,39 +80,49 @@ impl Kind {
             4 => Some(Kind::Avx512),
             #[cfg(stable_vpclmulqdq)]
             5 => Some(Kind::Avx512Ymm),
+            #[cfg(stable_vpclmulqdq)]
+            6 => Some(Kind::Avx512Cancel),
             _ => None,
         }
     }
 
-    /// The `AVX-512` kind for this CPU.
+    /// The `AVX-512` kind for this CPU:
+    ///
+    /// - `Avx512Ymm` on the Intel CPUs whose frequency drops too eagerly when 512-bit registers are
+    ///   used only occasionally: Ice Lake and Tiger Lake, the list libdeflate uses.
+    /// - `Avx512Cancel` on AMD Zen 5 in 64-bit mode, which runs one `VPCLMULQDQ` per two cycles but
+    ///   three or four 512-bit XORs per cycle. Intel CPUs run 512-bit XORs and `VPCLMULQDQ` on the
+    ///   same two ports, so trading multiplies for XORs would slow them down.
+    /// - `Avx512` everywhere else.
     #[cfg(stable_vpclmulqdq)]
-    #[inline]
+    #[allow(unused_unsafe)] // `__cpuid` is a safe function on newer toolchains
     fn avx512() -> Self {
-        if eager_zmm_downclocking() {
-            Kind::Avx512Ymm
+        const GENUINE_INTEL: (u32, u32, u32) = (0x756e_6547, 0x4965_6e69, 0x6c65_746e);
+        const AUTHENTIC_AMD: (u32, u32, u32) = (0x6874_7541, 0x6974_6e65, 0x444d_4163);
+
+        // SAFETY: Only called for CPUs with AVX-512, which all have the CPUID instruction.
+        let vendor = unsafe { arch::__cpuid(0) };
+        // SAFETY: As above.
+        let eax = unsafe { arch::__cpuid(1) }.eax;
+        let base_family = (eax >> 8) & 0xf;
+        let family = if base_family == 0xf {
+            base_family + ((eax >> 20) & 0xff)
         } else {
-            Kind::Avx512
+            base_family
+        };
+        let model = ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0);
+
+        // Registers EBX, EDX, ECX spell out the vendor in that order.
+        match (vendor.ebx, vendor.edx, vendor.ecx) {
+            // Ice Lake server (106, 108) and client (126), Tiger Lake (140, 141).
+            GENUINE_INTEL if family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141) => {
+                Kind::Avx512Ymm
+            }
+            // The cancelling loop keeps 22 vectors in registers, which 32-bit x86 doesn't have.
+            AUTHENTIC_AMD if family == 0x1a && cfg!(target_arch = "x86_64") => Kind::Avx512Cancel,
+            _ => Kind::Avx512,
         }
     }
-}
-
-/// Whether this is one of the Intel CPUs whose frequency drops too eagerly when 512-bit registers
-/// are used only occasionally: Ice Lake and Tiger Lake, the list libdeflate uses.
-#[cfg(stable_vpclmulqdq)]
-#[allow(unused_unsafe)] // `__cpuid` is a safe function on newer toolchains
-fn eager_zmm_downclocking() -> bool {
-    // SAFETY: Only called for CPUs with AVX-512, which all have the CPUID instruction.
-    let vendor = unsafe { arch::__cpuid(0) };
-    // "GenuineIntel", in EBX, EDX, ECX order.
-    if (vendor.ebx, vendor.edx, vendor.ecx) != (0x756e_6547, 0x4965_6e69, 0x6c65_746e) {
-        return false;
-    }
-    // SAFETY: As above.
-    let eax = unsafe { arch::__cpuid(1) }.eax;
-    let family = (eax >> 8) & 0xf;
-    let model = ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0);
-    // Ice Lake server (106, 108) and client (126), Tiger Lake (140, 141).
-    family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141)
 }
 
 #[derive(Clone)]
@@ -207,9 +223,13 @@ impl State {
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx2 => calculate_avx2(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES>(state, buf),
+                Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES, false>(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_DOWNCLOCKING>(state, buf),
+                Kind::Avx512Ymm => {
+                    calculate_avx512::<MIN_ZMM_BYTES_DOWNCLOCKING, false>(state, buf)
+                }
+                #[cfg(stable_vpclmulqdq)]
+                Kind::Avx512Cancel => calculate_avx512::<MIN_ZMM_BYTES, true>(state, buf),
             }
         }
     }
@@ -264,7 +284,7 @@ unsafe fn calculate(crc: u32, data: &[u8]) -> u32 {
     if data.len() < 16 {
         return crate::baseline::update_short(crc, data);
     }
-    fold_crc::<__m128i>(crc, data)
+    fold_crc::<__m128i, false>(crc, data)
 }
 
 /// `AVX2` kernel: 256-bit `VPCLMULQDQ`, folding two 128-bit lanes per instruction.
@@ -283,7 +303,7 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
     if data.len() < 16 {
         return crate::baseline::update_short(crc, data);
     }
-    fold_crc::<__m256i>(crc, data)
+    fold_crc::<__m256i, false>(crc, data)
 }
 
 /// `AVX-512` kernel: 512-bit `VPCLMULQDQ` (four 128-bit lanes per instruction) for inputs of
@@ -302,16 +322,40 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
     enable = "avx512f",
     enable = "avx512vl"
 )]
-unsafe fn calculate_avx512<const MIN_ZMM: usize>(crc: u32, data: &[u8]) -> u32 {
+unsafe fn calculate_avx512<const MIN_ZMM: usize, const CANCEL: bool>(crc: u32, data: &[u8]) -> u32 {
     let n = data.len();
     if n < 16 {
         return crate::baseline::update_short(crc, data);
     }
     if n < MIN_ZMM {
-        fold_crc::<__m256i>(crc, data)
+        fold_crc::<__m256i, false>(crc, data)
+    } else if CANCEL && n >= MIN_CANCEL_BYTES {
+        calculate_avx512_cancel(crc, data)
     } else {
-        fold_crc::<__m512i>(crc, data)
+        fold_crc::<__m512i, false>(crc, data)
     }
+}
+
+/// `calculate_avx512` for inputs that start with `cancel_and_fold_512`, in a function of its own.
+/// That loop keeps 22 vectors in registers, and on Windows, where `xmm6` to `xmm15` are
+/// callee-saved, a function that uses them saves and restores them on every call. Inlined into
+/// `calculate_avx512`, that cost about 1 ns per call for every input length on Zen 5.
+#[cfg(stable_vpclmulqdq)]
+#[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
+#[inline(never)]
+#[target_feature(
+    enable = "pclmulqdq",
+    enable = "sse2",
+    enable = "sse4.1",
+    enable = "ssse3",
+    enable = "avx",
+    enable = "avx2",
+    enable = "vpclmulqdq",
+    enable = "avx512f",
+    enable = "avx512vl"
+)]
+unsafe fn calculate_avx512_cancel(crc: u32, data: &[u8]) -> u32 {
+    fold_crc::<__m512i, true>(crc, data)
 }
 
 /// A vector of one or more 128-bit lanes for `fold_crc`. Every method is `#[inline(always)]` so
@@ -338,6 +382,12 @@ trait Vector: Copy {
     /// Folds the lanes together into one, consuming any whole vectors of a narrower width that
     /// remain in `rest`.
     unsafe fn reduce(self, rest: &mut &[u8]) -> __m128i;
+
+    /// Starts the main loop by cancelling chunks with XORs; see `cancel_and_fold_512`. Only
+    /// called when `fold_crc`'s `CANCEL` is set, which only 512-bit vectors support.
+    unsafe fn cancel_and_fold(_init: __m128i, _rest: &mut &[u8]) -> [Self; 8] {
+        unreachable!()
+    }
 }
 
 impl Vector for __m128i {
@@ -472,6 +522,171 @@ impl Vector for __m512i {
         }
         y.reduce(rest)
     }
+
+    #[inline(always)]
+    unsafe fn cancel_and_fold(init: __m128i, rest: &mut &[u8]) -> [Self; 8] {
+        cancel_and_fold_512(init, rest)
+    }
+}
+
+/// Invokes `$m!(i, args...)` for `i` in `0..16`, with `i` as a literal.
+#[cfg(stable_vpclmulqdq)]
+macro_rules! each_of_16 {
+    ($m:ident $(, $arg:tt)*) => {
+        $m!(0 $(, $arg)*);
+        $m!(1 $(, $arg)*);
+        $m!(2 $(, $arg)*);
+        $m!(3 $(, $arg)*);
+        $m!(4 $(, $arg)*);
+        $m!(5 $(, $arg)*);
+        $m!(6 $(, $arg)*);
+        $m!(7 $(, $arg)*);
+        $m!(8 $(, $arg)*);
+        $m!(9 $(, $arg)*);
+        $m!(10 $(, $arg)*);
+        $m!(11 $(, $arg)*);
+        $m!(12 $(, $arg)*);
+        $m!(13 $(, $arg)*);
+        $m!(14 $(, $arg)*);
+        $m!(15 $(, $arg)*);
+    };
+}
+
+/// Inputs this long and up start with `cancel_and_fold_512`. It needs 4 KiB: one 2 KiB block to
+/// cancel chunks in, and the 2 KiB after it that those chunks are XORed into. (`fold_crc` refers to
+/// it on every toolchain, so it isn't gated on `stable_vpclmulqdq` like the function.)
+const MIN_CANCEL_BYTES: usize = 4096;
+
+/// Starts the 512-bit main loop on CPUs whose vector units can run many XORs alongside the
+/// carry-less multiplies, which limit the fold's throughput (AMD Zen 5 runs one `VPCLMULQDQ` per
+/// two cycles, whatever its width, but three or four 512-bit XORs per cycle).
+///
+/// `G(x)` divides `G(x^512)`, which is `G(x)^512` since coefficients are bits. So XORing a 64-byte
+/// chunk into the chunks `32 - e` places after it, for each exponent `e < 32` of `G(x)`, and then
+/// clearing it, adds a multiple of `G(x)` to the message and leaves its CRC unchanged. That
+/// "cancels" the chunk with 14 XORs and no multiplies. (This is the idea behind the Chorba
+/// algorithm, <https://arxiv.org/abs/2412.16398>.) This cancels every even-numbered chunk and folds
+/// the odd-numbered ones into four accumulators as usual, halving the multiplies per byte.
+///
+/// Rather than pushing each cancelled chunk into the 14 later chunks, each chunk pulls in the
+/// cancelled chunks that land on it, from the last 16 of them, which stay in registers. Of the 14
+/// offsets, the 9 even ones land on chunks that are cancelled in turn, and the 5 odd ones on
+/// folded chunks. Each loop iteration covers 2 KiB (32 chunks), so the 16 saved chunks rotate
+/// through fixed registers. Afterwards, the cancelled chunks are pulled into the next 2 KiB, which
+/// is folded into all eight accumulators, and the main loop carries on without cancelling.
+///
+/// Returns the eight accumulators as of the end of the consumed input, with the even ones (whose
+/// chunks were cancelled) folded in from the final 2 KiB.
+#[cfg(stable_vpclmulqdq)]
+#[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
+#[inline(always)]
+unsafe fn cancel_and_fold_512(init: __m128i, rest: &mut &[u8]) -> [__m512i; 8] {
+    debug_assert!(rest.len() >= MIN_CANCEL_BYTES);
+    let zero = arch::_mm512_setzero_si512();
+    let m = __m512i::splat(FOLD_4096);
+    // `h[k]` is the cancelled value of chunk `start - 32 + 2k`, where `start` is the first chunk of
+    // the current 2 KiB block. Each slot is overwritten as its replacement is computed, so while
+    // pair `P` is processed, slots below `P` already hold chunks of the current block.
+    let mut h = [zero; 16];
+    // `acc[j]` accumulates the odd chunks `8i + 2j + 1`.
+    let mut acc = [zero; 4];
+
+    // Processes pair `P` of `block`: the cancelled chunk `2P` and the folded chunk `2P + 1`. Each
+    // pulls in the cancelled chunks at the offsets of its parity: the even offsets
+    // 6, 10, 16, 20, 22, 24, 28, 30, 32 are in slots `P + 16 - o/2`, and the odd offsets
+    // 9, 21, 25, 27, 31 in slots `P + (33 - o)/2`, both mod 16. In the first block, slots `P` and
+    // up would be chunks before the input, which are zero, so those pulls are skipped, the CRC
+    // state is added to chunk 0, and the accumulators start from their first chunk.
+    macro_rules! pair {
+        ($p:literal, $block:ident, $first:literal) => {{
+            const P: usize = $p;
+            const FIRST: bool = $first;
+            macro_rules! pull {
+                ($x:ident, $k:literal) => {
+                    if !FIRST || (P + $k) % 16 < P {
+                        $x = $x.xor(h[(P + $k) % 16]);
+                    }
+                };
+            }
+            let mut even = __m512i::load(&$block[128 * P..]);
+            if FIRST && P == 0 {
+                even = even.xor(__m512i::from_128(init));
+            }
+            pull!(even, 13);
+            pull!(even, 11);
+            pull!(even, 8);
+            pull!(even, 6);
+            pull!(even, 5);
+            pull!(even, 4);
+            pull!(even, 2);
+            pull!(even, 1);
+            pull!(even, 0);
+            h[P] = even;
+            let mut odd = __m512i::load(&$block[128 * P + 64..]);
+            pull!(odd, 12);
+            pull!(odd, 6);
+            pull!(odd, 4);
+            pull!(odd, 3);
+            pull!(odd, 1);
+            acc[P % 4] = if FIRST && P < 4 {
+                odd
+            } else {
+                acc[P % 4].fold(odd, m)
+            };
+        }};
+    }
+
+    let block = &rest[..2048];
+    each_of_16!(pair, block, true);
+    *rest = &rest[2048..];
+    while rest.len() >= 4096 {
+        let block = &rest[..2048];
+        each_of_16!(pair, block, false);
+        *rest = &rest[2048..];
+    }
+
+    // The next 32 chunks still have cancelled chunks to pull in: those less than 32 chunks before
+    // them, in slots `Q + k` below 16. Fold them into all eight accumulators; the even ones are
+    // empty, so their first chunk is just moved in.
+    let block = &rest[..2048];
+    let mut v = [zero, acc[0], zero, acc[1], zero, acc[2], zero, acc[3]];
+    macro_rules! drain {
+        ($q:literal, $block:ident) => {{
+            const Q: usize = $q;
+            macro_rules! pull {
+                ($x:ident, $k:literal) => {
+                    if Q + $k < 16 {
+                        $x = $x.xor(h[(Q + $k) % 16]);
+                    }
+                };
+            }
+            let mut even = __m512i::load(&$block[128 * Q..]);
+            pull!(even, 13);
+            pull!(even, 11);
+            pull!(even, 8);
+            pull!(even, 6);
+            pull!(even, 5);
+            pull!(even, 4);
+            pull!(even, 2);
+            pull!(even, 1);
+            pull!(even, 0);
+            v[(2 * Q) % 8] = if Q < 4 {
+                even
+            } else {
+                v[(2 * Q) % 8].fold(even, m)
+            };
+            let mut odd = __m512i::load(&$block[128 * Q + 64..]);
+            pull!(odd, 12);
+            pull!(odd, 6);
+            pull!(odd, 4);
+            pull!(odd, 3);
+            pull!(odd, 1);
+            v[(2 * Q + 1) % 8] = v[(2 * Q + 1) % 8].fold(odd, m);
+        }};
+    }
+    each_of_16!(drain, block);
+    *rest = &rest[2048..];
+    v
 }
 
 /// Computes the CRC of `data`, which must be at least 16 bytes long, folding it with `V`-wide
@@ -483,28 +698,33 @@ impl Vector for __m512i {
 /// vectors if that many bytes remain. So the leftover is consumed a group at a time instead of a
 /// 16-byte block at a time, and the final partial block takes one more multiply.
 #[inline(always)]
-unsafe fn fold_crc<V: Vector>(crc: u32, data: &[u8]) -> u32 {
+unsafe fn fold_crc<V: Vector, const CANCEL: bool>(crc: u32, data: &[u8]) -> u32 {
     debug_assert!(data.len() >= 16);
     let len = V::LEN;
     let init = arch::_mm_cvtsi32_si128(!crc as i32);
     let mut rest = data;
 
     let x = if data.len() >= len {
-        let first = V::load(rest).xor(V::from_128(init));
         let v = if data.len() >= 2 * len {
             let (mut v0, v1) = if data.len() >= 4 * len {
-                let mut v0 = first;
-                let mut v1 = V::load(&rest[len..]);
-                let mut v2 = V::load(&rest[2 * len..]);
-                let mut v3 = V::load(&rest[3 * len..]);
-                rest = &rest[4 * len..];
-
-                if rest.len() >= 4 * len {
-                    let mut v4 = V::load(rest);
-                    let mut v5 = V::load(&rest[len..]);
-                    let mut v6 = V::load(&rest[2 * len..]);
-                    let mut v7 = V::load(&rest[3 * len..]);
-                    rest = &rest[4 * len..];
+                let [mut v0, mut v1, v2, v3] = if data.len() >= 8 * len {
+                    let [mut v0, mut v1, mut v2, mut v3, mut v4, mut v5, mut v6, mut v7] =
+                        if CANCEL && data.len() >= MIN_CANCEL_BYTES {
+                            V::cancel_and_fold(init, &mut rest)
+                        } else {
+                            let v = [
+                                V::load(rest).xor(V::from_128(init)),
+                                V::load(&rest[len..]),
+                                V::load(&rest[2 * len..]),
+                                V::load(&rest[3 * len..]),
+                                V::load(&rest[4 * len..]),
+                                V::load(&rest[5 * len..]),
+                                V::load(&rest[6 * len..]),
+                                V::load(&rest[7 * len..]),
+                            ];
+                            rest = &rest[8 * len..];
+                            v
+                        };
 
                     let m8 = V::splat(V::M8);
                     while rest.len() >= 8 * len {
@@ -532,7 +752,17 @@ unsafe fn fold_crc<V: Vector>(crc: u32, data: &[u8]) -> u32 {
                         v3 = v3.fold(V::load(&rest[3 * len..]), m4);
                         rest = &rest[4 * len..];
                     }
-                }
+                    [v0, v1, v2, v3]
+                } else {
+                    let v = [
+                        V::load(rest).xor(V::from_128(init)),
+                        V::load(&rest[len..]),
+                        V::load(&rest[2 * len..]),
+                        V::load(&rest[3 * len..]),
+                    ];
+                    rest = &rest[4 * len..];
+                    v
+                };
 
                 // Four to two.
                 let m2 = V::splat(V::M2);
@@ -545,9 +775,10 @@ unsafe fn fold_crc<V: Vector>(crc: u32, data: &[u8]) -> u32 {
                 }
                 (v0, v1)
             } else {
+                let v0 = V::load(rest).xor(V::from_128(init));
                 let v1 = V::load(&rest[len..]);
                 rest = &rest[2 * len..];
-                (first, v1)
+                (v0, v1)
             };
 
             // Two to one.
@@ -559,8 +790,9 @@ unsafe fn fold_crc<V: Vector>(crc: u32, data: &[u8]) -> u32 {
             }
             v0
         } else {
+            let v0 = V::load(rest).xor(V::from_128(init));
             rest = &rest[len..];
-            first
+            v0
         };
 
         // One vector to 128 bits.
@@ -637,7 +869,7 @@ mod test {
         #[cfg(stable_vpclmulqdq)]
         let avx512 = matches!(
             State::new().expect("not supported").kind,
-            Kind::Avx512 | Kind::Avx512Ymm
+            Kind::Avx512 | Kind::Avx512Ymm | Kind::Avx512Cancel
         );
         let kinds = [
             Some(Kind::Sse),
@@ -648,6 +880,8 @@ mod test {
             avx512.then_some(Kind::Avx512),
             #[cfg(stable_vpclmulqdq)]
             avx512.then_some(Kind::Avx512Ymm),
+            #[cfg(stable_vpclmulqdq)]
+            avx512.then_some(Kind::Avx512Cancel),
         ];
         kinds.into_iter().flatten().map(|kind| State { kind })
     }
@@ -671,7 +905,7 @@ mod test {
     // Exercises every kernel across the sizes and alignments where the strategy switches.
     #[test]
     fn check_large_inputs_against_baseline() {
-        let mut data = vec![0u8; 8200];
+        let mut data = vec![0u8; 16600];
         let mut s: u32 = 0x1234_5678;
         for b in data.iter_mut() {
             s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -680,7 +914,8 @@ mod test {
 
         let mut lens: Vec<usize> = (0..=160).collect();
         for &edge in &[
-            192usize, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192,
+            192usize, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288,
+            14336, 16384,
         ] {
             lens.extend(edge - 17..=edge + 17);
         }
