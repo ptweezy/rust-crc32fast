@@ -28,9 +28,12 @@ jobs:
     env:
       # name=branch@commit; the first is the baseline.
       VARIANTS: >-
-        base=master@118796a864d40beed113e887522531d5474b8abc
-        tree=x86-tree-folding@b003e0e2f626c69e57aefae1d37e820a951c865f
-        cancel=x86-zen5-xor-cancel@51850ead95a1609c18538779e718610a459fe762
+        base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
+        cache=x86-cache-kernel@92ea50a95bd9a3b8be0cdea51b61757f9a9e4909
+        reduce=x86-three-multiply-reduction@c275ebe70b512fd0f28d4bed4649aee17069b0ee
+        pr77=x86-tree-folding@b003e0e2f626c69e57aefae1d37e820a951c865f
+        tree=x86-tree-folding-v2@23914db6642bf2466e7da702edd50307deaf7188
+        cancel=x86-zen5-xor-cancel-v2@b4e558fa2eb57d0816b5c477ffd0fb2b9c3ca57e
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
