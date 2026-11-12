@@ -1,7 +1,8 @@
 name: x86 bench
 
 # Compares the x86 kernels on GitHub-hosted x86 runners, whose CPUs vary from job to job (AMD Zen 3
-# and Zen 4, Intel Ice Lake and newer), so each job prints its CPU. Each job builds every variant
+# and Zen 4, Intel Ice Lake and newer; the Intel Macs have no VPCLMULQDQ, so they run the SSE
+# kernel), so each job prints its CPU. Each job builds every variant
 # on its own machine, runs the tests, then alternates benchmark rounds between them.
 
 on:
@@ -20,6 +21,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         # Several jobs per image, to catch more of the CPU models behind each runner pool.
         run: [1, 2, 3, 4, 5, 6]
+        include:
+          - os: macos-15-intel
+            run: 1
+          - os: macos-15-intel
+            run: 2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -29,11 +35,10 @@ jobs:
       # name=branch@commit; the first is the baseline.
       VARIANTS: >-
         base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
-        cache=x86-cache-kernel@92ea50a95bd9a3b8be0cdea51b61757f9a9e4909
         reduce=x86-three-multiply-reduction@c275ebe70b512fd0f28d4bed4649aee17069b0ee
-        pr77=x86-tree-folding@b003e0e2f626c69e57aefae1d37e820a951c865f
-        tree=x86-tree-folding-v2@23914db6642bf2466e7da702edd50307deaf7188
-        cancel=x86-zen5-xor-cancel-v2@b4e558fa2eb57d0816b5c477ffd0fb2b9c3ca57e
+        tree8=x86-tree-folding-v2@23914db6642bf2466e7da702edd50307deaf7188
+        tree=x86-tree-folding-v3@21597c68276f8fdfd97a1f6d2e8552aec7561899
+        cancel=x86-zen5-xor-cancel-v3@1d698c87c515aa631078cc8775178cae5699a5e5
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +59,9 @@ jobs:
               grep -qw "$f" /proc/cpuinfo && flags="$flags $f"
             done
             echo "flags:$flags" | tee -a cpu.txt
+          elif [ "$RUNNER_OS" = macOS ]; then
+            sysctl -n machdep.cpu.brand_string | tee cpu.txt
+            echo "features: $(sysctl -n machdep.cpu.features machdep.cpu.leaf7_features | tr ' ' '\n' | grep -E '^(PCLMULQDQ|AVX2|AVX512F|VPCLMULQDQ)$' | tr '\n' ' ')" | tee -a cpu.txt
           else
             powershell -Command "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name" | tr -d '\r' | tee cpu.txt
           fi
