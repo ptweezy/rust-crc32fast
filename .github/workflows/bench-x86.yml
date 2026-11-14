@@ -19,8 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        # This round only runs on Ice Lake, which the Linux pool has handed to about one job in
-        # seven, so it starts many: the others stop once they've printed their CPU.
+        # Many jobs, to catch every CPU model in the Linux pool.
         run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
@@ -28,18 +27,15 @@ jobs:
       run:
         shell: bash
     env:
-      # name=branch@commit; the first is the baseline. The others differ only on Ice Lake and
-      # Tiger Lake: 512-bit vectors from 512 bytes (the PR as it stands), from 2 KiB (its fourth
-      # commit, and what 1.5.5 does), from 2 KiB with the AVX2 kernel below, and never.
+      # name=branch@commit; the first is the baseline. This round runs only the mixed benchmark,
+      # on every CPU: does a CRC slow down the code around it? With AVX-512, 1.5.5 uses 512-bit
+      # vectors from 2 KiB, and the PR from 64 bytes (from 512 on Ice Lake and Tiger Lake).
       VARIANTS: >-
         base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
-        z512=x86-tree-folding@485adc2b5bcb0555951265da69aea2612566fdf8
-        z2k=x86-tree-folding@9caeff2439ea5f4739bb8725d613ea06efd626c2
-        a2k=bench-icl-avx2-2k@b5a9b0279f020cd9d743b082545ab9c6a9628d1f
-        ymm=x86-tree-folding-v4@eaaf6fbee4488be4cbcc9841767fb24e0d599981
-      # The same builds for the mixed benchmark, which asks what 512-bit vectors cost the code
-      # around the CRC: so its baseline is the build that never uses them.
-      MIXED_ORDER: ymm z512 z2k a2k base
+        pr=x86-tree-folding@485adc2b5bcb0555951265da69aea2612566fdf8
+      MIXED_ORDER: base pr
+      # Rounds of the CRC-only benchmarks: none this time.
+      CRITERION_ROUNDS: ""
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -68,11 +64,10 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round's variants differ only on the CPUs in `eager_zmm_downclocking`; other jobs
-          # stop here.
+          # This round runs on every CPU.
           icl=$(awk -F': *' '/^vendor_id/{v=$2} /^cpu family/{f=$2} /^model[^ a-z]*:/{m=$2} END{if (v=="GenuineIntel" && f==6 && (m==106||m==108||m==126||m==140||m==141)) print "yes"; else print "no"}' /proc/cpuinfo 2>/dev/null || echo no)
           echo "Ice Lake or Tiger Lake: $icl"
-          if [ "$icl" = yes ] || grep -q 8370C cpu.txt; then
+          if true; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
@@ -117,7 +112,7 @@ jobs:
             done
           done
           echo "mixed rounds done"
-          for r in 1 2 3 4 5; do
+          for r in $CRITERION_ROUNDS; do
             for spec in $VARIANTS; do
               name=${spec%%=*}
               "$HOME/bin/$name" --bench --noplot --warm-up-time 0.5 --measurement-time 1.5 \
