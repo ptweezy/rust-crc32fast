@@ -18,27 +18,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        # Several jobs per image, to catch more of the CPU models behind each runner pool.
-        run: [1, 2, 3, 4, 5, 6]
-        include:
-          - os: macos-15-intel
-            run: 1
-          - os: macos-15-intel
-            run: 2
+        os: [ubuntu-latest]
+        # This round only runs on Ice Lake, which the Linux pool has handed to about one job in
+        # seven, so it starts many: the others stop once they've printed their CPU.
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     env:
-      # name=branch@commit; the first is the baseline.
+      # name=branch@commit; the first is the baseline. The others differ only on Ice Lake and
+      # Tiger Lake: 512-bit vectors from 512 bytes (the PR as it stands), from 2 KiB (its fourth
+      # commit, and what 1.5.5 does), and never.
       VARIANTS: >-
         base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
-        reduce=x86-three-multiply-reduction@c275ebe70b512fd0f28d4bed4649aee17069b0ee
-        tree8=x86-tree-folding-v2@23914db6642bf2466e7da702edd50307deaf7188
-        tree=x86-tree-folding-v3@21597c68276f8fdfd97a1f6d2e8552aec7561899
-        cancel=x86-zen5-xor-cancel-v3@1d698c87c515aa631078cc8775178cae5699a5e5
+        z512=x86-tree-folding@485adc2b5bcb0555951265da69aea2612566fdf8
+        z2k=x86-tree-folding@9caeff2439ea5f4739bb8725d613ea06efd626c2
+        ymm=x86-tree-folding-v4@eaaf6fbee4488be4cbcc9841767fb24e0d599981
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +64,11 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round runs on every CPU.
-          if true; then
+          # This round's variants differ only on the CPUs in `eager_zmm_downclocking`; other jobs
+          # stop here.
+          icl=$(awk -F': *' '/^vendor_id/{v=$2} /^cpu family/{f=$2} /^model[^ a-z]*:/{m=$2} END{if (v=="GenuineIntel" && f==6 && (m==106||m==108||m==126||m==140||m==141)) print "yes"; else print "no"}' /proc/cpuinfo 2>/dev/null || echo no)
+          echo "Ice Lake or Tiger Lake: $icl"
+          if [ "$icl" = yes ] || grep -q 8370C cpu.txt; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
