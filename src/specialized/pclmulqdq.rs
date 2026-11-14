@@ -106,7 +106,9 @@ fn eager_zmm_downclocking() -> bool {
     let family = (eax >> 8) & 0xf;
     let model = ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0);
     // Ice Lake server (106, 108) and client (126), Tiger Lake (140, 141).
-    family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141)
+    // Bench only: every Intel CPU, not just these models.
+    let _ = family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141);
+    true
 }
 
 #[derive(Clone)]
