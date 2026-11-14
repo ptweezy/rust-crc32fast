@@ -44,6 +44,9 @@ enum Kind {
     /// As `Avx512`, but with 512-bit vectors only for long inputs, for Intel CPUs.
     #[cfg(stable_vpclmulqdq)]
     Avx512Ymm,
+    /// As `Avx512Ymm`, but with 128-bit vectors for the other inputs, for Intel's Ice Lake family.
+    #[cfg(stable_vpclmulqdq)]
+    Avx512Xmm,
 }
 
 impl Kind {
@@ -59,6 +62,8 @@ impl Kind {
             Some(Kind::Avx512) => 4,
             #[cfg(stable_vpclmulqdq)]
             Some(Kind::Avx512Ymm) => 5,
+            #[cfg(stable_vpclmulqdq)]
+            Some(Kind::Avx512Xmm) => 6,
         }
     }
 
@@ -73,6 +78,8 @@ impl Kind {
             4 => Some(Kind::Avx512),
             #[cfg(stable_vpclmulqdq)]
             5 => Some(Kind::Avx512Ymm),
+            #[cfg(stable_vpclmulqdq)]
+            6 => Some(Kind::Avx512Xmm),
             _ => {
                 debug_assert_eq!(code, 1, "code from `encode` has no `decode` arm");
                 None
@@ -84,10 +91,12 @@ impl Kind {
     #[cfg(stable_vpclmulqdq)]
     #[inline]
     fn avx512() -> Self {
-        if is_intel() {
-            Kind::Avx512Ymm
-        } else {
+        if !is_intel() {
             Kind::Avx512
+        } else if is_ice_lake_family() {
+            Kind::Avx512Xmm
+        } else {
+            Kind::Avx512Ymm
         }
     }
 }
@@ -107,6 +116,25 @@ fn is_intel() -> bool {
     let vendor = unsafe { arch::__cpuid(0) };
     // "GenuineIntel", in EBX, EDX, ECX order.
     (vendor.ebx, vendor.edx, vendor.ecx) == (0x756e_6547, 0x4965_6e69, 0x6c65_746e)
+}
+
+/// Whether this Intel CPU is an Ice Lake or one of its derivatives, Tiger Lake and Rocket Lake.
+/// There a 256-bit carry-less multiply takes three micro-ops and runs at half the rate of a
+/// 128-bit one, so 256-bit vectors fold no more bytes per cycle and cost more per call. On Ice
+/// Lake, 128-bit vectors are faster than 256-bit ones at every length below 2 KiB, and three
+/// times as fast for a 1 KiB CRC that follows a millisecond of other work.
+///
+/// On Emerald Rapids and Granite Rapids, where that multiply is one micro-op, 256-bit vectors are
+/// up to twice as fast as 128-bit ones.
+#[cfg(stable_vpclmulqdq)]
+#[allow(unused_unsafe)] // `__cpuid` is a safe function on newer toolchains
+fn is_ice_lake_family() -> bool {
+    // SAFETY: Only called for CPUs with AVX-512, which all have the CPUID instruction.
+    let eax = unsafe { arch::__cpuid(1) }.eax;
+    let family = (eax >> 8) & 0xf;
+    let model = ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0);
+    // Ice Lake server (106, 108) and client (126), Tiger Lake (140, 141), Rocket Lake (167).
+    family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141 | 167)
 }
 
 #[derive(Clone)]
@@ -207,9 +235,11 @@ impl State {
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx2 => calculate_avx2(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES>(state, buf),
+                Kind::Avx512 => calculate_avx512::<__m256i, MIN_ZMM_BYTES>(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_INTEL>(state, buf),
+                Kind::Avx512Ymm => calculate_avx512::<__m256i, MIN_ZMM_BYTES_INTEL>(state, buf),
+                #[cfg(stable_vpclmulqdq)]
+                Kind::Avx512Xmm => calculate_avx512::<__m128i, MIN_ZMM_BYTES_INTEL>(state, buf),
             }
         }
     }
@@ -240,8 +270,8 @@ const FOLD_4096: Mults = fold_by(4096);
 const BARRETT_MU: i64 = 0xb4e5b025f7011641_u64 as i64;
 const BARRETT_G: i64 = 0x1db710641;
 
-/// Inputs this long and up use 512-bit vectors in the `AVX-512` kernel; shorter ones use 256-bit
-/// vectors with the same features.
+/// Inputs this long and up use 512-bit vectors in the `AVX-512` kernel; shorter ones use
+/// narrower vectors with the same features.
 #[cfg(stable_vpclmulqdq)]
 const MIN_ZMM_BYTES: usize = 64;
 
@@ -285,8 +315,8 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
 }
 
 /// `AVX-512` kernel: 512-bit `VPCLMULQDQ` (four 128-bit lanes per instruction) for inputs of
-/// `MIN_ZMM` bytes or more, and 256-bit for shorter ones. Either way, `AVX-512VL` lets the
-/// compiler merge each fold's two XORs into one `vpternlogq` and use 32 vector registers.
+/// `MIN_ZMM` bytes or more, and vectors of type `N` for shorter ones. Either way, `AVX-512VL` lets
+/// the compiler merge each fold's two XORs into one `vpternlogq` and use 32 vector registers.
 #[cfg(stable_vpclmulqdq)]
 #[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
 #[target_feature(
@@ -300,13 +330,13 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
     enable = "avx512f",
     enable = "avx512vl"
 )]
-unsafe fn calculate_avx512<const MIN_ZMM: usize>(crc: u32, data: &[u8]) -> u32 {
+unsafe fn calculate_avx512<N: Vector, const MIN_ZMM: usize>(crc: u32, data: &[u8]) -> u32 {
     let n = data.len();
     if n < 16 {
         return crate::baseline::update_short(crc, data);
     }
     if n < MIN_ZMM {
-        fold_crc::<__m256i>(crc, data)
+        fold_crc::<N>(crc, data)
     } else {
         fold_crc::<__m512i>(crc, data)
     }
@@ -634,7 +664,7 @@ mod test {
         #[cfg(stable_vpclmulqdq)]
         let avx512 = matches!(
             State::new().expect("not supported").kind,
-            Kind::Avx512 | Kind::Avx512Ymm
+            Kind::Avx512 | Kind::Avx512Ymm | Kind::Avx512Xmm
         );
         let kinds = [
             Some(Kind::Sse),
@@ -645,6 +675,8 @@ mod test {
             avx512.then_some(Kind::Avx512),
             #[cfg(stable_vpclmulqdq)]
             avx512.then_some(Kind::Avx512Ymm),
+            #[cfg(stable_vpclmulqdq)]
+            avx512.then_some(Kind::Avx512Xmm),
         ];
         kinds.into_iter().flatten().map(|kind| State { kind })
     }
