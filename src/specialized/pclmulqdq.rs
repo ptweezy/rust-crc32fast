@@ -41,8 +41,8 @@ enum Kind {
     /// 256- and 512-bit `VPCLMULQDQ` with `AVX-512`.
     #[cfg(stable_vpclmulqdq)]
     Avx512,
-    /// As `Avx512`, but with 512-bit vectors only for long inputs, for CPUs that downclock too
-    /// eagerly when they're used.
+    /// 256-bit `VPCLMULQDQ` with `AVX-512`, for CPUs that downclock too eagerly when 512-bit
+    /// vectors are used.
     #[cfg(stable_vpclmulqdq)]
     Avx512Ymm,
 }
@@ -207,9 +207,9 @@ impl State {
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx2 => calculate_avx2(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES>(state, buf),
+                Kind::Avx512 => calculate_avx512(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_DOWNCLOCKING>(state, buf),
+                Kind::Avx512Ymm => calculate_avx512_ymm(state, buf),
             }
         }
     }
@@ -244,11 +244,6 @@ const BARRETT_G: i64 = 0x1db710641;
 /// vectors with the same features.
 #[cfg(stable_vpclmulqdq)]
 const MIN_ZMM_BYTES: usize = 64;
-
-/// As `MIN_ZMM_BYTES`, on CPUs that downclock eagerly when 512-bit vectors are used, so that short
-/// inputs don't use them: the cutover the `AVX-512` kernel had on every CPU before.
-#[cfg(stable_vpclmulqdq)]
-const MIN_ZMM_BYTES_DOWNCLOCKING: usize = 2 * 1024;
 
 /// SSE kernel: 128-bit `PCLMULQDQ`.
 #[target_feature(
@@ -285,7 +280,7 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
 }
 
 /// `AVX-512` kernel: 512-bit `VPCLMULQDQ` (four 128-bit lanes per instruction) for inputs of
-/// `MIN_ZMM` bytes or more, and 256-bit for shorter ones. Either way, `AVX-512VL` lets the
+/// `MIN_ZMM_BYTES` bytes or more, and 256-bit for shorter ones. Either way, `AVX-512VL` lets the
 /// compiler merge each fold's two XORs into one `vpternlogq` and use 32 vector registers.
 #[cfg(stable_vpclmulqdq)]
 #[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
@@ -300,16 +295,43 @@ unsafe fn calculate_avx2(crc: u32, data: &[u8]) -> u32 {
     enable = "avx512f",
     enable = "avx512vl"
 )]
-unsafe fn calculate_avx512<const MIN_ZMM: usize>(crc: u32, data: &[u8]) -> u32 {
+unsafe fn calculate_avx512(crc: u32, data: &[u8]) -> u32 {
     let n = data.len();
     if n < 16 {
         return crate::baseline::update_short(crc, data);
     }
-    if n < MIN_ZMM {
+    if n < MIN_ZMM_BYTES {
         fold_crc::<__m256i>(crc, data)
     } else {
         fold_crc::<__m512i>(crc, data)
     }
+}
+
+/// `AVX-512` kernel for CPUs that downclock eagerly when 512-bit vectors are used: 256-bit
+/// `VPCLMULQDQ` at every length, still with `vpternlogq` and 32 vector registers. libdeflate and
+/// the Linux kernel's CRC code keep to 256-bit vectors on these CPUs too.
+///
+/// A lower frequency slows down whatever runs after the CRC, which a benchmark of this kernel
+/// can't show. No length cutover bounds that cost, because one long input lowers the frequency as
+/// surely as a short one does.
+#[cfg(stable_vpclmulqdq)]
+#[allow(clippy::incompatible_msrv)] // intrinsics are gated to rustc >= 1.89 by build.rs
+#[target_feature(
+    enable = "pclmulqdq",
+    enable = "sse2",
+    enable = "sse4.1",
+    enable = "ssse3",
+    enable = "avx",
+    enable = "avx2",
+    enable = "vpclmulqdq",
+    enable = "avx512f",
+    enable = "avx512vl"
+)]
+unsafe fn calculate_avx512_ymm(crc: u32, data: &[u8]) -> u32 {
+    if data.len() < 16 {
+        return crate::baseline::update_short(crc, data);
+    }
+    fold_crc::<__m256i>(crc, data)
 }
 
 /// A vector of one or more 128-bit lanes for `fold_crc`. Every method is `#[inline(always)]` so
