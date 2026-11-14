@@ -30,12 +30,16 @@ jobs:
     env:
       # name=branch@commit; the first is the baseline. The others differ only on Ice Lake and
       # Tiger Lake: 512-bit vectors from 512 bytes (the PR as it stands), from 2 KiB (its fourth
-      # commit, and what 1.5.5 does), and never.
+      # commit, and what 1.5.5 does), from 2 KiB with the AVX2 kernel below, and never.
       VARIANTS: >-
         base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
         z512=x86-tree-folding@485adc2b5bcb0555951265da69aea2612566fdf8
         z2k=x86-tree-folding@9caeff2439ea5f4739bb8725d613ea06efd626c2
+        a2k=bench-icl-avx2-2k@b5a9b0279f020cd9d743b082545ab9c6a9628d1f
         ymm=x86-tree-folding-v4@eaaf6fbee4488be4cbcc9841767fb24e0d599981
+      # The same builds for the mixed benchmark, which asks what 512-bit vectors cost the code
+      # around the CRC: so its baseline is the build that never uses them.
+      MIXED_ORDER: ymm z512 z2k a2k base
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -94,13 +98,25 @@ jobs:
               ext=""
               if [ "$RUNNER_OS" = Windows ]; then ext=.exe; fi
               cp "$exe" "$HOME/bin/$name$ext"
+              # The mixed benchmark is one file that only needs the crate.
+              mkdir -p examples
+              cp "$GITHUB_WORKSPACE/.github/bench/mixed.rs" examples/mixed.rs
+              cargo build --release --example mixed 2>&1 | grep -E '^(warning: unused|error)' || true
+              cp "target/release/examples/mixed$ext" "$HOME/bin/$name-mixed$ext"
             )
           done
 
       - name: Benchmark, interleaved
         if: steps.machine.outputs.run == 'true'
         run: |
-          mkdir -p results
+          mkdir -p results mixed
+          for r in 1 2 3 4 5 6 7 8 9 10; do
+            for spec in $VARIANTS; do
+              name=${spec%%=*}
+              "$HOME/bin/$name-mixed" > "mixed/$r.$name.txt"
+            done
+          done
+          echo "mixed rounds done"
           for r in 1 2 3 4 5; do
             for spec in $VARIANTS; do
               name=${spec%%=*}
@@ -119,10 +135,16 @@ jobs:
             echo '```text'
             python3 .github/bench/compare.py results $names || python .github/bench/compare.py results $names
             echo '```'
+            echo "Next to scalar work (see mixed.rs), against the build without 512-bit vectors:"
+            echo '```text'
+            python3 .github/bench/compare.py mixed $MIXED_ORDER || python .github/bench/compare.py mixed $MIXED_ORDER
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - if: always() && steps.machine.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: x86-${{ matrix.os }}-${{ matrix.run }}
-          path: results
+          path: |
+            results
+            mixed
