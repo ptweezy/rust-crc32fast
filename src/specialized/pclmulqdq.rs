@@ -41,8 +41,7 @@ enum Kind {
     /// 256- and 512-bit `VPCLMULQDQ` with `AVX-512`.
     #[cfg(stable_vpclmulqdq)]
     Avx512,
-    /// As `Avx512`, but with 512-bit vectors only for long inputs, for CPUs that downclock too
-    /// eagerly when they're used.
+    /// As `Avx512`, but with 512-bit vectors only for long inputs, for Intel CPUs.
     #[cfg(stable_vpclmulqdq)]
     Avx512Ymm,
 }
@@ -85,7 +84,7 @@ impl Kind {
     #[cfg(stable_vpclmulqdq)]
     #[inline]
     fn avx512() -> Self {
-        if eager_zmm_downclocking() {
+        if is_intel() {
             Kind::Avx512Ymm
         } else {
             Kind::Avx512
@@ -93,23 +92,21 @@ impl Kind {
     }
 }
 
-/// Whether this is one of the Intel CPUs whose frequency drops too eagerly when 512-bit registers
-/// are used only occasionally: Ice Lake and Tiger Lake, the list libdeflate uses.
+/// Whether this is an Intel CPU. On those, 512-bit vectors only make a short input faster when
+/// the calls come back to back, as they do in a benchmark of the kernel alone:
+///
+/// - On Emerald Rapids and Granite Rapids, a 1 KiB CRC that follows 40 microseconds or more of
+///   other work takes 40-70% longer with 512-bit vectors than with 256-bit ones.
+/// - On Ice Lake, the code after a CRC that used them runs 3% slower for about a millisecond.
+///
+/// AMD's Zen 4 and Zen 5 show neither effect.
 #[cfg(stable_vpclmulqdq)]
 #[allow(unused_unsafe)] // `__cpuid` is a safe function on newer toolchains
-fn eager_zmm_downclocking() -> bool {
+fn is_intel() -> bool {
     // SAFETY: Only called for CPUs with AVX-512, which all have the CPUID instruction.
     let vendor = unsafe { arch::__cpuid(0) };
     // "GenuineIntel", in EBX, EDX, ECX order.
-    if (vendor.ebx, vendor.edx, vendor.ecx) != (0x756e_6547, 0x4965_6e69, 0x6c65_746e) {
-        return false;
-    }
-    // SAFETY: As above.
-    let eax = unsafe { arch::__cpuid(1) }.eax;
-    let family = (eax >> 8) & 0xf;
-    let model = ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0);
-    // Ice Lake server (106, 108) and client (126), Tiger Lake (140, 141).
-    family == 6 && matches!(model, 106 | 108 | 126 | 140 | 141)
+    (vendor.ebx, vendor.edx, vendor.ecx) == (0x756e_6547, 0x4965_6e69, 0x6c65_746e)
 }
 
 #[derive(Clone)]
@@ -212,7 +209,7 @@ impl State {
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES>(state, buf),
                 #[cfg(stable_vpclmulqdq)]
-                Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_DOWNCLOCKING>(state, buf),
+                Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_INTEL>(state, buf),
             }
         }
     }
@@ -248,10 +245,10 @@ const BARRETT_G: i64 = 0x1db710641;
 #[cfg(stable_vpclmulqdq)]
 const MIN_ZMM_BYTES: usize = 64;
 
-/// As `MIN_ZMM_BYTES`, on CPUs that downclock eagerly when 512-bit vectors are used, so that short
-/// inputs don't use them: the cutover the `AVX-512` kernel had on every CPU before.
+/// As `MIN_ZMM_BYTES`, on Intel CPUs (see `is_intel`): the cutover the `AVX-512` kernel had on
+/// every CPU before.
 #[cfg(stable_vpclmulqdq)]
-const MIN_ZMM_BYTES_DOWNCLOCKING: usize = 2 * 1024;
+const MIN_ZMM_BYTES_INTEL: usize = 2 * 1024;
 
 /// SSE kernel: 128-bit `PCLMULQDQ`.
 #[target_feature(
