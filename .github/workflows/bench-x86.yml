@@ -18,9 +18,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        # This round is for Ice Lake, which few jobs land on, so it starts many.
-        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        os: [ubuntu-latest, windows-latest]
+        # Several jobs per image, to catch more of the CPU models behind each runner pool.
+        run: [1, 2, 3, 4, 5, 6, 7, 8]
+        include:
+          - os: macos-15-intel
+            run: 1
+          - os: macos-15-intel
+            run: 2
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -62,10 +67,10 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round is for Ice Lake; other jobs stop here.
+          # This round runs on every CPU.
           icl=$(awk -F': *' '/^vendor_id/{v=$2} /^cpu family/{f=$2} /^model[^ a-z]*:/{m=$2} END{if (v=="GenuineIntel" && f==6 && (m==106||m==108||m==126||m==140||m==141)) print "yes"; else print "no"}' /proc/cpuinfo 2>/dev/null || echo no)
           echo "Ice Lake or Tiger Lake: $icl"
-          if [ "$icl" = yes ] || grep -q 8370C cpu.txt; then
+          if true; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
