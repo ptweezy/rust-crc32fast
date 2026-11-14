@@ -306,7 +306,12 @@ unsafe fn calculate_avx512<const MIN_ZMM: usize>(crc: u32, data: &[u8]) -> u32 {
         return crate::baseline::update_short(crc, data);
     }
     if n < MIN_ZMM {
-        fold_crc::<__m256i>(crc, data)
+        // Bench only: where 512-bit vectors start late (Intel), 128-bit ones below that.
+        if MIN_ZMM > MIN_ZMM_BYTES {
+            fold_crc::<__m128i>(crc, data)
+        } else {
+            fold_crc::<__m256i>(crc, data)
+        }
     } else {
         fold_crc::<__m512i>(crc, data)
     }
