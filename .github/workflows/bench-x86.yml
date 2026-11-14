@@ -27,15 +27,16 @@ jobs:
       run:
         shell: bash
     env:
-      # name=branch@commit; the first is the baseline. This round runs only the mixed benchmark,
-      # on every CPU: does a CRC slow down the code around it? With AVX-512, 1.5.5 uses 512-bit
-      # vectors from 2 KiB, and the PR from 64 bytes (from 512 on Ice Lake and Tiger Lake).
+      # name=branch@commit; the first is the baseline. This round runs on Intel CPUs. With
+      # AVX-512, 1.5.5 uses 512-bit vectors from 2 KiB, the PR from 64 bytes (from 512 on Ice Lake
+      # and Tiger Lake), and `i2k` is the PR with 512-bit vectors from 2 KiB on every Intel CPU.
       VARIANTS: >-
         base=x86-cache-kernel@8a93d2a70c00ab3e72beda42014b18fad8e496ea
         pr=x86-tree-folding@485adc2b5bcb0555951265da69aea2612566fdf8
-      MIXED_ORDER: base pr
-      # Rounds of the CRC-only benchmarks: none this time.
-      CRITERION_ROUNDS: ""
+        i2k=bench-intel-2k@253d4c178c5f7104a54a78783767ea5b56d40aa7
+      MIXED_ORDER: base pr i2k
+      # Rounds of the CRC-only benchmarks.
+      CRITERION_ROUNDS: "1 2 3 4 5"
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -64,10 +65,10 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round runs on every CPU.
+          # This round's variants differ only on Intel CPUs; other jobs stop here.
           icl=$(awk -F': *' '/^vendor_id/{v=$2} /^cpu family/{f=$2} /^model[^ a-z]*:/{m=$2} END{if (v=="GenuineIntel" && f==6 && (m==106||m==108||m==126||m==140||m==141)) print "yes"; else print "no"}' /proc/cpuinfo 2>/dev/null || echo no)
           echo "Ice Lake or Tiger Lake: $icl"
-          if true; then
+          if grep -qi intel cpu.txt; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
