@@ -208,6 +208,12 @@ impl State {
                 Kind::Avx2 => calculate_avx2(state, buf),
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx512 => calculate_avx512::<MIN_ZMM_BYTES>(state, buf),
+                // Bench only: below the 512-bit cutover, the `AVX2` kernel instead of 256-bit
+                // vectors with `AVX-512VL`. `AVX-512F` implies `AVX2`.
+                #[cfg(stable_vpclmulqdq)]
+                Kind::Avx512Ymm if buf.len() < MIN_ZMM_BYTES_DOWNCLOCKING => {
+                    calculate_avx2(state, buf)
+                }
                 #[cfg(stable_vpclmulqdq)]
                 Kind::Avx512Ymm => calculate_avx512::<MIN_ZMM_BYTES_DOWNCLOCKING>(state, buf),
             }
