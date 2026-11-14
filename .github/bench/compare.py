@@ -50,8 +50,10 @@ for key in sorted(times, key=lambda k: (k[1], k[0])):
             row += f" | {'':>10} {'':>7} {'':>15}"
             continue
         mo = statistics.median(o)
+        # A clock too coarse for a measurement reads zero; there is no change to show then.
         per = [100 * (d[(v, r)] - d[(base, r)]) / d[(base, r)]
-               for r in rounds if (v, r) in d and (base, r) in d]
-        rng = f"{min(per):+.0f}%..{max(per):+.0f}%"
-        row += f" | {fmt(mo):>10} {100 * (mo - mb) / mb:+6.1f}% {rng:>15}"
+               for r in rounds if (v, r) in d and (base, r) in d and d[(base, r)]]
+        rng = f"{min(per):+.0f}%..{max(per):+.0f}%" if per else ""
+        change = f"{100 * (mo - mb) / mb:+6.1f}%" if mb else "    n/a"
+        row += f" | {fmt(mo):>10} {change} {rng:>15}"
     print(row)

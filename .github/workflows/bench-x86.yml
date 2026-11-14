@@ -19,25 +19,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        # Many jobs, to catch every CPU model in the Linux pool.
-        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        # This round is for Ice Lake, which few jobs land on, so it starts many.
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     env:
-      # name=branch@commit; the first is the baseline: master, the PR rebased onto it, and two
-      # other ways to fold below the 512-bit cutover: 256-bit vectors with four accumulators
-      # instead of eight, and (on Intel only) 128-bit vectors.
+      # name=branch@commit; the first is the baseline: master, and the PR rebased onto it.
       VARIANTS: >-
-        master=x86-tree-folding-v6@f3dbcd668f525f6c6014072df21e2396063640d9
-        pr=x86-tree-folding-v6@f3a2b979b7808ff5ebfb620e33c46b2a11c124bc
-        y4=bench-v6-y4@69609ec5ac48d13909611273d2025a9e0be7ede8
-        x8=bench-v6-x8@516d2843bc6d0d5a81a0eead96f89eefbf95e727
-      MIXED_ORDER: master pr y4 x8
-      # Rounds of the Criterion benchmarks: none this time, sweep.rs covers more lengths.
-      CRITERION_ROUNDS: ""
+        master=x86-tree-folding-v7@f3dbcd668f525f6c6014072df21e2396063640d9
+        pr=x86-tree-folding-v7@dc9eac9e10495342b945c9652d0bf7335fc5e086
+      MIXED_ORDER: master pr
+      # Rounds of the Criterion benchmarks.
+      CRITERION_ROUNDS: "1 2 3 4 5"
       CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@v4
@@ -66,10 +62,10 @@ jobs:
           fi
           # One line, for the summary heading.
           tr '\n' ' ' < cpu.txt > cpu1.txt && mv cpu1.txt cpu.txt
-          # This round runs on every CPU.
+          # This round is for Ice Lake; other jobs stop here.
           icl=$(awk -F': *' '/^vendor_id/{v=$2} /^cpu family/{f=$2} /^model[^ a-z]*:/{m=$2} END{if (v=="GenuineIntel" && f==6 && (m==106||m==108||m==126||m==140||m==141)) print "yes"; else print "no"}' /proc/cpuinfo 2>/dev/null || echo no)
           echo "Ice Lake or Tiger Lake: $icl"
-          if true; then
+          if [ "$icl" = yes ] || grep -q 8370C cpu.txt; then
             echo run=true >> "$GITHUB_OUTPUT"
           else
             echo run=false >> "$GITHUB_OUTPUT"
